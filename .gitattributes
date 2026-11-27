@@ -1,0 +1,6 @@
+* text=auto
+*.lisp text eol=lf
+*.asd text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.ros text eol=lf
