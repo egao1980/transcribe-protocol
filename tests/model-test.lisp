@@ -1,0 +1,145 @@
+;;;; The model (given in the contract): note events, MIDI and Hz, contours,
+;;;; phrase drifts, the data, and the protocol's defaults.
+
+(in-package #:transcribe-protocol/tests)
+
+(deftest note-event-fields
+  (let ((n (make-note-event :onset 0.5d0 :offset 3/2 :pitch 61.37 :confidence 0.25)))
+    (ok (eql 1/2 (note-event-onset n)))
+    (ok (eql 3/2 (note-event-offset n)))
+    (ok (typep (note-event-pitch n) 'double-float))
+    (ok (= (float 61.37 1d0) (note-event-pitch n)))
+    (ok (eql 0.25d0 (note-event-confidence n)))
+    (ok (eql 1 (note-event-duration n))))
+  (let ((n (make-note-event :onset 0 :offset 1/3 :pitch 60)))
+    (ok (eql 1d0 (note-event-confidence n)))
+    (ok (eql 60d0 (note-event-pitch n)))
+    (ok (eql 1/3 (note-event-duration n))))
+  (ok (equalp (note 0 1 60) (note 0 1 60d0)))
+  (ok (not (equalp (note 0 1 60) (note 0 1 61)))))
+
+(deftest-parametrize note-event-type-errors
+    ((args)
+     ('(:onset -1 :offset 1 :pitch 60))
+     ('(:onset "0" :offset 1 :pitch 60))
+     ('(:onset 0 :offset nil :pitch 60))
+     ('(:onset 0 :offset 1 :pitch 128))
+     ('(:onset 0 :offset 1 :pitch -1/2))
+     ('(:onset 0 :offset 1))
+     ('(:onset 0 :offset 1 :pitch 60 :confidence 3/2))
+     ('(:onset 0 :offset 1 :pitch 60 :confidence -0.1)))
+  (ok (signals (apply #'make-note-event args) 'type-error)))
+
+(deftest-parametrize note-event-order-errors
+    ((onset offset)
+     (1 1)
+     (2 1)
+     (0.5d0 1/2))
+  (ok (signals (make-note-event :onset onset :offset offset :pitch 60) 'transcribe-error)))
+
+(deftest note-event-store-value
+  (let ((n (handler-bind ((type-error (lambda (c) (store-value 64 c))))
+             (make-note-event :onset 0 :offset 1 :pitch 200))))
+    (ok (eql 64d0 (note-event-pitch n)))))
+
+(deftest-parametrize midi-and-hz
+    ((midi hz)
+     (69 440d0)
+     (81 880d0)
+     (57 220d0)
+     (60 261.6255653005986d0)
+     (45 110d0))
+  (ok (close-to (midi-to-hz midi) hz 1d-9))
+  (ok (close-to (hz-to-midi hz) midi 1d-9)))
+
+(deftest midi-and-hz-exact-a4
+  (ok (eql 440d0 (midi-to-hz 69)))
+  (ok (eql 69d0 (hz-to-midi 440)))
+  (ok (typep (midi-to-hz 60.5) 'double-float))
+  (ok (close-to (hz-to-midi (midi-to-hz 61.37d0)) 61.37d0 1d-9))
+  (ok (signals (hz-to-midi 0) 'type-error))
+  (ok (signals (hz-to-midi -440) 'type-error))
+  (ok (signals (midi-to-hz "A4") 'type-error)))
+
+(deftest f0-contour-model
+  (let ((c (make-f0-contour :sample-rate 16000 :hop 256 :f0 '(220 nil 230.5))))
+    (ok (= 3 (contour-length c)))
+    (ok (equalp #(220d0 nil 230.5d0) (f0-contour-f0 c)))
+    (ok (typep (f0-contour-f0 c) 'simple-vector))
+    (ok (equalp #(1d0 0d0 1d0) (f0-contour-voicing c)))
+    (ok (typep (f0-contour-voicing c) '(simple-array double-float (*))))
+    (ok (eql 0 (contour-frame-time c 0)))
+    (ok (eql 6/125 (contour-frame-time c 3)))
+    (ok (eql 125/2 (contour-frame-rate c))))
+  (let ((c (make-f0-contour :sample-rate 8000 :hop 80 :f0 #(nil 100) :voicing '(0.1 0.9))))
+    (ok (equalp (vector (float 0.1 1d0) (float 0.9 1d0)) (f0-contour-voicing c)))
+    (ok (equalp #(nil 100d0) (f0-contour-f0 c)))
+    (ok (eql 100 (contour-frame-rate c)))
+    (ok (eql 1/100 (contour-frame-time c 1))))
+  (ok (= 0 (contour-length (make-f0-contour))))
+  (ok (equalp (make-f0-contour :f0 '(100 nil)) (make-f0-contour :f0 #(100d0 nil)))))
+
+(deftest-parametrize f0-contour-errors
+    ((args type)
+     ('(:sample-rate 0) 'type-error)
+     ('(:hop 1/2) 'type-error)
+     ('(:f0 (100 0)) 'type-error)
+     ('(:f0 (100 -5)) 'type-error)
+     ('(:f0 ("100")) 'type-error)
+     ('(:f0 (100) :voicing (3/2)) 'type-error)
+     ('(:f0 (100 nil) :voicing (1)) 'transcribe-error))
+  (ok (signals (apply #'make-f0-contour args) type)))
+
+(deftest phrase-drift-model
+  (let ((d (make-phrase-drift :start 0.5d0 :end 2 :first 3 :count 4 :cents -12)))
+    (ok (eql 1/2 (phrase-drift-start d)))
+    (ok (eql 2 (phrase-drift-end d)))
+    (ok (eql 3 (phrase-drift-first d)))
+    (ok (eql 4 (phrase-drift-count d)))
+    (ok (eql -12 (phrase-drift-cents d))))
+  (ok (equalp (make-phrase-drift :start 0 :end 1 :count 2 :cents 5)
+              (make-phrase-drift :start 0 :end 1 :count 2 :cents 5)))
+  (ok (signals (make-phrase-drift :cents 50) 'type-error))
+  (ok (signals (make-phrase-drift :count 0) 'type-error))
+  (ok (signals (make-phrase-drift :start 2 :end 1) 'transcribe-error)))
+
+(deftest data
+  (ok (equal '(:key :meter :tempo :pitch-range) +hint-keys+))
+  (ok (equal '(36 84) +default-pitch-range+))
+  (ok (= 100 (length +tuning-offsets+)))
+  (ok (equal '(0 -1 1 -2 2) (subseq +tuning-offsets+ 0 5)))
+  (ok (equal '(-49 49 -50) (last +tuning-offsets+ 3)))
+  (ok (equal (loop for d from -50 to 49 collect d) (sort (copy-list +tuning-offsets+) #'<)))
+  (ok (eql 1/4 +phrase-gap+))
+  (ok (eql 3 +min-phrase-notes+))
+  (ok (eql 16000 +default-sample-rate+))
+  (ok (eql 1/10 *minimum-duration*))
+  (ok (eql -60 *silence-peak-db*)))
+
+(defclass plain-transcriber (transcriber) ())
+
+(deftest transcriber-defaults
+  (let ((x (make-instance 'plain-transcriber)))
+    (ok (eql 16000 (transcriber-sample-rate x)))
+    (ok (equal '(:name "plain-transcriber") (transcriber-info x))))
+  (let ((yin (make-instance 'yin-transcriber)))
+    (ok (equal '(:name "yin-transcriber") (transcriber-info yin)))
+    (ok (eql 16000 (transcriber-sample-rate yin)))
+    (ok (eql 1024 (yin-transcriber-frame-size yin)))
+    (ok (eql 128 (yin-transcriber-hop yin)))
+    (ok (eql 1/5 (yin-transcriber-threshold yin)))
+    (ok (eql -40 (yin-transcriber-gate-db yin)))
+    (ok (eql 3/4 (yin-transcriber-jump yin)))
+    (ok (eql 3/50 (yin-transcriber-min-duration yin)))))
+
+(deftest-parametrize yin-initarg-errors
+    ((args)
+     ('(:frame-size 1023))
+     ('(:frame-size 2))
+     ('(:hop 0))
+     ('(:threshold 0))
+     ('(:threshold 3/2))
+     ('(:gate-db 6))
+     ('(:jump 0))
+     ('(:min-duration -1)))
+  (ok (signals (apply #'make-instance 'yin-transcriber args) 'type-error)))
