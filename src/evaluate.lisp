@@ -53,18 +53,79 @@
 
 (in-package #:transcribe-protocol)
 
+(defun %maximum-matching (reference estimate onset-tolerance pitch-tolerance-cents
+                          offset-ratio offset-min-tolerance strict)
+  "(values pairs n-reference n-estimate): a maximum matching of the candidate
+graph as a fresh list of (i . j) sorted by i, after the checks of the file
+header, in its order."
+  (let ((ref (%note-vector reference))
+        (est (%note-vector estimate)))
+    (check-type onset-tolerance (real 0))
+    (check-type pitch-tolerance-cents (real 0))
+    (check-type offset-ratio (or null (real 0)))
+    (check-type offset-min-tolerance (real 0))
+    (let* ((n-ref (length ref))
+           (n-est (length est))
+           (onset-tol (rational onset-tolerance))
+           (cents-tol (rational pitch-tolerance-cents))
+           (ratio (and offset-ratio (rational offset-ratio)))
+           (min-tol (rational offset-min-tolerance)))
+      (flet ((within (distance tolerance)
+               (if strict (< distance tolerance) (<= distance tolerance))))
+        (flet ((candidate-p (r e)
+                 (and (within (abs (- (note-event-onset r) (note-event-onset e))) onset-tol)
+                      (within (* 100 (abs (- (rational (note-event-pitch r))
+                                             (rational (note-event-pitch e)))))
+                              cents-tol)
+                      (or (null ratio)
+                          (within (abs (- (note-event-offset r) (note-event-offset e)))
+                                  (max (* ratio (note-event-duration r)) min-tol))))))
+          (let ((candidates (make-array n-ref))
+                (owner (make-array n-est :initial-element nil)))   ; estimate j -> reference i
+            (dotimes (i n-ref)
+              (setf (svref candidates i)
+                    (loop for j below n-est
+                          when (candidate-p (svref ref i) (svref est j))
+                            collect j)))
+            ;; Kuhn's augmenting paths: a maximum matching (Berge's theorem).
+            (labels ((augment (i seen)
+                       (dolist (j (svref candidates i) nil)
+                         (unless (svref seen j)
+                           (setf (svref seen j) t)
+                           (when (or (null (svref owner j))
+                                     (augment (svref owner j) seen))
+                             (setf (svref owner j) i)
+                             (return t))))))
+              (dotimes (i n-ref)
+                (augment i (make-array n-est :initial-element nil))))
+            (values (sort (loop for j below n-est
+                                for i = (svref owner j)
+                                when i
+                                  collect (cons i j))
+                          #'< :key #'car)
+                    n-ref
+                    n-est)))))))
+
 (defun match-notes (reference estimate &key (onset-tolerance 1/20) (pitch-tolerance-cents 50)
                                             offset-ratio (offset-min-tolerance 1/20) strict)
   "A maximum matching of REFERENCE and ESTIMATE notes under mir_eval's
 criteria, as (reference-index . estimate-index) conses. See evaluate.lisp."
-  (declare (ignorable reference estimate onset-tolerance pitch-tolerance-cents
-                      offset-ratio offset-min-tolerance strict))
-  (%t0-pending 'match-notes))
+  (values (%maximum-matching reference estimate onset-tolerance pitch-tolerance-cents
+                             offset-ratio offset-min-tolerance strict)))
 
 (defun note-f-measure (reference estimate &key (onset-tolerance 1/20) (pitch-tolerance-cents 50)
                                                offset-ratio (offset-min-tolerance 1/20) strict)
   "(values f precision recall matched) of ESTIMATE against REFERENCE, mir_eval's
 note metrics, exact. See evaluate.lisp."
-  (declare (ignorable reference estimate onset-tolerance pitch-tolerance-cents
-                      offset-ratio offset-min-tolerance strict))
-  (%t0-pending 'note-f-measure))
+  (multiple-value-bind (pairs n-ref n-est)
+      (%maximum-matching reference estimate onset-tolerance pitch-tolerance-cents
+                         offset-ratio offset-min-tolerance strict)
+    (if (or (zerop n-ref) (zerop n-est))
+        (values 0 0 0 0)
+        (let* ((m (length pairs))
+               (precision (/ m n-est))
+               (recall (/ m n-ref))
+               (f (if (zerop (+ precision recall))
+                      0
+                      (/ (* 2 precision recall) (+ precision recall)))))
+          (values f precision recall m)))))

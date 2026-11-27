@@ -95,5 +95,26 @@ by default 1 where F0 is a number and 0 where it is NIL. See contour.lisp."
 (defun notes-contour (notes &key (sample-rate 16000) (hop 256) frames)
   "The F0-CONTOUR of NOTES: f0 and voicing of the note sounding at each frame
 time, NIL and 0 elsewhere. See contour.lisp."
-  (declare (ignorable notes sample-rate hop frames))
-  (%t0-pending 'notes-contour))
+  (let ((v (check-notes notes)))
+    (check-type sample-rate (integer 1))
+    (check-type hop (integer 1))
+    (check-type frames (or null (integer 0)))
+    (let* ((n (length v))
+           (count (or frames
+                      (if (zerop n)
+                          0
+                          (ceiling (* (note-event-offset (svref v (1- n))) sample-rate) hop))))
+           (f0 (make-array count :initial-element nil))
+           (voicing (make-array count :element-type 'double-float :initial-element 0d0))
+           (k 0))
+      ;; One line in time order, so one pointer walks the notes as the frame
+      ;; times rise: skip the notes that ended at or before t_i.
+      (dotimes (i count)
+        (let ((time (/ (* i hop) sample-rate)))
+          (loop while (and (< k n) (<= (note-event-offset (svref v k)) time))
+                do (incf k))
+          (when (and (< k n) (<= (note-event-onset (svref v k)) time))
+            (let ((note (svref v k)))
+              (setf (svref f0 i) (midi-to-hz (note-event-pitch note))
+                    (aref voicing i) (note-event-confidence note))))))
+      (make-f0-contour :sample-rate sample-rate :hop hop :f0 f0 :voicing voicing))))

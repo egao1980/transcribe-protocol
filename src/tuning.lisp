@@ -120,26 +120,127 @@ CENTS relative to the take's tuning offset."
 
 ;;; API -----------------------------------------------------------------------
 
+;;; The exact cost and its search -------------------------------------------------
+
+(defun %weighted-pitches (notes start end)
+  "A fresh list of (100q . w) for notes START .. END-1 of the SIMPLE-VECTOR
+NOTES: q the pitch's exact RATIONAL, w the duration in seconds, exact."
+  (loop for i from start below end
+        for note = (svref notes i)
+        collect (cons (* 100 (rational (note-event-pitch note)))
+                      (note-event-duration note))))
+
+(defun %offset-cost (pairs m)
+  "L(m) = sum of w |r(q, m)| over PAIRS, (100q . w), for the integer offset M:
+r = x - 100 floor(x/100 + 1/2), x = 100q - m. Exact."
+  (loop for (cents . weight) in pairs
+        sum (let ((x (- cents m)))
+              (* weight (abs (- x (* 100 (floor (+ (/ x 100) 1/2)))))))))
+
+(defun %best-offset (pairs centre)
+  "The d of +TUNING-OFFSETS+ with the least (%offset-cost PAIRS (+ CENTRE d)):
+the first strict minimum in that order, so ties go to the earlier offset."
+  (let ((best nil)
+        (best-cost nil))
+    (dolist (d +tuning-offsets+ best)
+      (let ((cost (%offset-cost pairs (+ centre d))))
+        (when (or (null best-cost) (< cost best-cost))
+          (setf best d
+                best-cost cost))))))
+
+(defun %phrase-drifts-p (x)
+  "True for a list or vector of PHRASE-DRIFTs."
+  (and (or (vectorp x) (%proper-list-p x))
+       (every #'phrase-drift-p x)))
+
+;;; API -----------------------------------------------------------------------
+
 (defun estimate-tuning (notes)
   "The take's tuning offset in cents, -50 .. 49: the duration-weighted circular
 median of the notes' residuals. See tuning.lisp."
-  (declare (ignorable notes))
-  (%t0-pending 'estimate-tuning))
+  (let ((v (%note-vector notes)))
+    (%best-offset (%weighted-pitches v 0 (length v)) 0)))
 
 (defun segment-phrases (notes &key (gap +phrase-gap+) (min-notes +min-phrase-notes+))
   "Phrases of NOTES as half-open index ranges (first . end), split at rests of
 at least GAP seconds, phrases of fewer than MIN-NOTES notes merged. See tuning.lisp."
-  (declare (ignorable notes gap min-notes))
-  (%t0-pending 'segment-phrases))
+  (let ((v (check-notes notes)))
+    (check-type gap (real 0))
+    (check-type min-notes (integer 1))
+    (let ((n (length v))
+          (splits '())
+          (start 0))
+      ;; 1. Split before note i at a rest of at least GAP.
+      (loop for i from 1 below n
+            when (>= (- (note-event-onset (svref v i)) (note-event-offset (svref v (1- i))))
+                     gap)
+              do (push (cons start i) splits)
+                 (setf start i))
+      (when (plusp n)
+        (push (cons start n) splits))
+      ;; 2. Merge, left to right. Until a phrase has been emitted, leading
+      ;; phrases collect in PENDING until it holds MIN-NOTES notes; after that a
+      ;; short phrase joins the last one emitted.
+      (let ((out '())
+            (pending nil))
+        (dolist (range (nreverse splits))
+          (cond (out
+                 (if (< (- (cdr range) (car range)) min-notes)
+                     (setf (cdr (first out)) (cdr range))
+                     (push range out)))
+                (t
+                 (setf pending (cons (if pending (car pending) (car range)) (cdr range)))
+                 (when (>= (- (cdr pending) (car pending)) min-notes)
+                   (push pending out)
+                   (setf pending nil)))))
+        ;; The whole take has fewer than MIN-NOTES notes: one phrase.
+        (when pending
+          (push pending out))
+        (nreverse out)))))
 
 (defun estimate-drift (notes &key tuning (gap +phrase-gap+) (min-notes +min-phrase-notes+))
   "One PHRASE-DRIFT per phrase of NOTES: its drift in cents relative to TUNING
 (default: ESTIMATE-TUNING). See tuning.lisp."
-  (declare (ignorable notes tuning gap min-notes))
-  (%t0-pending 'estimate-drift))
+  (let ((v (check-notes notes)))
+    (check-type tuning (or null integer))
+    (let ((g (or tuning (estimate-tuning v))))
+      (map 'simple-vector
+           (lambda (range)
+             (destructuring-bind (first . end) range
+               (make-phrase-drift :start (note-event-onset (svref v first))
+                                  :end (note-event-offset (svref v (1- end)))
+                                  :first first
+                                  :count (- end first)
+                                  :cents (%best-offset (%weighted-pitches v first end) g))))
+           (segment-phrases v :gap gap :min-notes min-notes)))))
 
 (defun remove-drift (notes drift &key (tuning 0))
   "NOTES with each phrase's offset TUNING + CENTS removed from its pitches, as
 fresh NOTE-EVENTs. See tuning.lisp."
-  (declare (ignorable notes drift tuning))
-  (%t0-pending 'remove-drift))
+  (let ((v (check-notes notes)))
+    (check-type drift (satisfies %phrase-drifts-p) "a list or vector of PHRASE-DRIFTs")
+    (check-type tuning integer)
+    (let* ((n (length v))
+           (cents (make-array n :initial-element nil)))
+      ;; In DRIFT's order, so a note in several phrases takes the last.
+      (map nil (lambda (phrase)
+                 (let* ((first (phrase-drift-first phrase))
+                        (end (+ first (phrase-drift-count phrase))))
+                   (when (> end n)
+                     (error 'transcribe-error
+                            :reason (format nil "phrase ~D .. ~D reaches past the last note (~D)"
+                                            first (1- end) n)))
+                   (loop for i from first below end
+                         do (setf (svref cents i) (phrase-drift-cents phrase)))))
+           drift)
+      (map 'simple-vector
+           (lambda (note c)
+             (make-note-event :onset (note-event-onset note)
+                              :offset (note-event-offset note)
+                              :pitch (if c
+                                         (float (- (rational (note-event-pitch note))
+                                                   (/ (+ tuning c) 100))
+                                                1d0)
+                                         (note-event-pitch note))
+                              :confidence (note-event-confidence note)))
+           v cents))))

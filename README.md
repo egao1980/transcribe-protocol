@@ -19,27 +19,27 @@ Monophonic audio-to-notes transcription for [cl-stack](https://github.com/egao19
 ;; score-backend-midi's NOTES-TO-SCORE.
 ```
 
-**Status:** slice T0 (0.1.0) is a **contract**: the functions below are stubs, and a team-solve run implements them. The design is in the capability brief [cl-stack/docs/capabilities/transcribe.md](https://github.com/egao1980/cl-stack/blob/main/docs/capabilities/transcribe.md). Each file header in `src/` states its rules, and the Rove suite in `tests/` is the spec. The pYIN backend comes next, in its own repository (`transcribe-backend-pyin`, slice T1).
+**Status:** slice T0 (0.1.0) is **implemented**: every function below is written, and the Rove suite passes (225 tests). The design is in the capability brief [cl-stack/docs/capabilities/transcribe.md](https://github.com/egao1980/cl-stack/blob/main/docs/capabilities/transcribe.md). Each file header in `src/` states its rules, and the Rove suite in `tests/` is the spec. The pYIN backend comes next, in its own repository (`transcribe-backend-pyin`, slice T1).
 
 | File | What | Status |
 |------|------|--------|
 | `src/conditions.lisp` | `transcribe-error`, `unusable-audio` (`audio-too-short`, `silent-audio`), `invalid-hint`, `invalid-notes`, `transcriber-error`; restarts are CLHS `continue` and `use-value` | T0, given |
 | `src/notes.lisp` | `note-event` (rational seconds, double MIDI pitch, confidence), `midi-to-hz`, `hz-to-midi` | T0, given |
-| | `check-notes` (one line in time order), `note-plists` | T0, contract |
+| | `check-notes` (one line in time order), `note-plists` | T0, implemented |
 | `src/contour.lisp` | `f0-contour` (frame i at i · hop / rate, f0 in Hz or NIL, voicing) | T0, given |
-| | `notes-contour` | T0, contract |
+| | `notes-contour` | T0, implemented |
 | `src/hints.lisp` | `+hint-keys+`, `+default-pitch-range+` | T0, given |
-| | `normalize-hints` (with `use-value` and `continue`), `hint-pitch-range` | T0, contract |
+| | `normalize-hints` (with `use-value` and `continue`), `hint-pitch-range` | T0, implemented |
 | `src/tuning.lisp` | `+tuning-offsets+`, `+phrase-gap+`, `+min-phrase-notes+`, `phrase-drift` | T0, given |
-| | `estimate-tuning` (a duration-weighted circular median on a 1-cent grid), `segment-phrases`, `estimate-drift`, `remove-drift` | T0, contract |
+| | `estimate-tuning` (a duration-weighted circular median on a 1-cent grid), `segment-phrases`, `estimate-drift`, `remove-drift` | T0, implemented |
 | `src/transcription.lisp` | `transcription` | T0, given |
-| | `finish-transcription` (tuning, drift, key fit) | T0, contract |
+| | `finish-transcription` (tuning, drift, key fit) | T0, implemented |
 | `src/protocol.lisp` | `transcriber`, `transcriber-sample-rate`, `transcriber-info`, `*minimum-duration*`, `*silence-peak-db*` | T0, given |
-| | `transcribe`, `detect-notes` (the default method), `prepare-audio` | T0, contract |
-| `src/evaluate.lisp` | `match-notes`, `note-f-measure` | T0, contract |
+| | `transcribe`, `detect-notes` (the default method), `prepare-audio` | T0, implemented |
+| `src/evaluate.lisp` | `match-notes`, `note-f-measure` | T0, implemented |
 | `src/backends.lisp` | the `oracle-transcriber` and `yin-transcriber` classes, initargs and their checks | T0, given |
-| | their `detect-notes` methods, and the oracle's note check | T0, contract |
-| `src/testing.lisp` | system `transcribe-protocol/testing`: `make-park-miller`, `melody-notes`, `detune-notes`, `synthesize-notes` | T0, contract |
+| | their `detect-notes` methods, and the oracle's note check | T0, implemented |
+| `src/testing.lisp` | system `transcribe-protocol/testing`: `make-park-miller`, `melody-notes`, `detune-notes`, `synthesize-notes` | T0, implemented |
 
 ```sh
 CL_REPO_DYNAMIC_SPACE_MB=2048 cl-repo test --system transcribe-protocol

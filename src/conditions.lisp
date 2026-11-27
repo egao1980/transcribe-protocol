@@ -94,8 +94,3 @@ something the protocol doesn't allow.")
   (:report (lambda (c s)
              (format s "Transcriber ~S failed~@[: ~A~]"
                      (transcriber-error-transcriber c) (transcribe-error-reason c)))))
-
-(defun %t0-pending (name)
-  "Contract stub for slice T0. Every call is replaced by the implementation,
-then this function is deleted."
-  (error "transcribe-protocol T0 pending: ~A" name))

@@ -92,14 +92,38 @@ PITCH (a MIDI number with cents, stored as a double) and CONFIDENCE (0..1)."
 (defun %proper-list-p (x)
   (handler-case (list-length x) (type-error () nil)))
 
+(defun %note-vector (notes &optional line)
+  "NOTES, a list or vector of NOTE-EVENTs (else TYPE-ERROR), as a fresh
+SIMPLE-VECTOR. Position by position, an element that isn't a NOTE-EVENT is
+INVALID-NOTES; with LINE true, so is a note out of order or overlapping the
+one before it (the CHECK-NOTES rules)."
+  (check-type notes (or vector (satisfies %proper-list-p)) "a list or vector of NOTE-EVENTs")
+  ;; MAP, not COERCE: COERCE returns a SIMPLE-VECTOR argument itself.
+  (let ((v (map 'simple-vector #'identity notes)))
+    (dotimes (i (length v) v)
+      (flet ((fail (reason)
+               (error 'invalid-notes :index i :reason reason)))
+        (let ((note (svref v i)))
+          (unless (note-event-p note)
+            (fail "not a note event"))
+          (when (and line (plusp i))
+            (let ((before (svref v (1- i))))
+              (cond ((< (note-event-onset note) (note-event-onset before))
+                     (fail "out of order"))
+                    ((< (note-event-onset note) (note-event-offset before))
+                     (fail "overlapping notes"))))))))))
+
 (defun check-notes (notes)
   "NOTES, one melodic line in time order, as a fresh SIMPLE-VECTOR; else
 INVALID-NOTES at the first offending index. See notes.lisp."
-  (declare (ignorable notes))
-  (%t0-pending 'check-notes))
+  (%note-vector notes t))
 
 (defun note-plists (notes)
   "One (:onset :offset :pitch :confidence) property list per note of NOTES,
 the event shape of score-backend-midi's NOTES-TO-SCORE."
-  (declare (ignorable notes))
-  (%t0-pending 'note-plists))
+  (map 'list (lambda (note)
+               (list :onset (note-event-onset note)
+                     :offset (note-event-offset note)
+                     :pitch (note-event-pitch note)
+                     :confidence (note-event-confidence note)))
+       (%note-vector notes)))

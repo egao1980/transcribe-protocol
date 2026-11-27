@@ -77,15 +77,20 @@
   (:documentation "A transcriber that returns given notes, whatever the audio."))
 
 (defmethod initialize-instance :after ((oracle oracle-transcriber) &key)
-  ;; T0: (check-notes notes), kept as a fresh SIMPLE-VECTOR (see the header).
-  (%t0-pending 'oracle-transcriber))
+  ;; One line, kept as a fresh SIMPLE-VECTOR.
+  (setf (slot-value oracle 'notes) (check-notes (slot-value oracle 'notes))))
 
 (defmethod transcriber-sample-rate ((oracle oracle-transcriber))
   nil)
 
 (defmethod detect-notes ((oracle oracle-transcriber) audio hints)
-  (declare (ignorable audio hints))
-  (%t0-pending 'oracle-transcriber))
+  (declare (ignore hints))
+  (let ((notes (oracle-transcriber-notes oracle)))
+    (values (copy-seq notes)
+            (notes-contour notes
+                           :sample-rate (audio:pcm-buffer-sample-rate audio)
+                           :hop 256
+                           :frames (dsp:frame-count (audio:pcm-buffer-frames audio) 256 256)))))
 
 ;;; YIN baseline ---------------------------------------------------------------
 
@@ -108,6 +113,121 @@ threshold, a level gate, run-length notes. See backends.lisp."))
     (check-type jump (real (0)))
     (check-type min-duration (real 0))))
 
+(defun %yin-frame (samples start size)
+  "SIZE samples of SAMPLES from index START on, as a fresh DOUBLE-FLOAT vector,
+0 outside SAMPLES (step 1)."
+  (declare (type audio:sample-vector samples)
+           (type fixnum start size))
+  (let ((frame (make-array size :element-type 'double-float :initial-element 0d0))
+        (length (length samples)))
+    (loop for j of-type fixnum from (max 0 (- start)) below (min size (- length start))
+          do (setf (aref frame j) (float (aref samples (+ start j)) 1d0)))
+    frame))
+
+(defun %yin-lag (d tau-lo tau-hi threshold)
+  "YIN step 4 on the d' vector D: the first lag in TAU-LO .. TAU-HI with d'
+below THRESHOLD, then the bottom of that dip; NIL when there is none."
+  (declare (type %double-vector d))
+  (loop for tau from tau-lo to tau-hi
+        when (< (aref d tau) threshold)
+          do (let ((k tau))
+               (loop while (and (< k tau-hi) (< (aref d (1+ k)) (aref d k)))
+                     do (incf k))
+               (return k))))
+
+(defun %yin-period (d tau)
+  "YIN step 5: the parabolic vertex tau* of d' at TAU - 1, TAU, TAU + 1, or TAU
+when a - 2b + c is not positive."
+  (declare (type %double-vector d))
+  (let* ((a (aref d (1- tau)))
+         (b (aref d tau))
+         (c (aref d (1+ tau)))
+         (den (+ (- a (* 2d0 b)) c))
+         (vertex (if (plusp den)
+                     (+ tau (/ (- a c) (* 2d0 den)))
+                     (float tau 1d0))))
+    ;; The one guard, outside the header's formula. Where a >= b <= c the
+    ;; vertex is within 1/2 of TAU. Only at the end of the lag range (TAU =
+    ;; tau_lo with a < b) can it stray, and only there can it be 0 or less,
+    ;; which would give no valid f0. Then TAU is used.
+    (if (plusp vertex) vertex (float tau 1d0))))
+
+(defun %median (sorted count)
+  "The median of the COUNT numbers of the ascending list SORTED: the middle
+value, or the mean of the two middle values for an even COUNT."
+  (multiple-value-bind (half odd) (floor count 2)
+    (if (= odd 1)
+        (nth half sorted)
+        (let ((tail (nthcdr (1- half) sorted)))
+          (/ (+ (first tail) (second tail)) 2)))))
+
 (defmethod detect-notes ((yin yin-transcriber) audio hints)
-  (declare (ignorable audio hints))
-  (%t0-pending 'yin-transcriber))
+  (let* ((samples (audio:pcm-buffer-samples audio))
+         (s (audio:pcm-buffer-sample-rate audio))
+         (length (length samples))
+         (n (yin-transcriber-frame-size yin))
+         (w (floor n 2))
+         (hop (yin-transcriber-hop yin))
+         (threshold (yin-transcriber-threshold yin))
+         (jump (yin-transcriber-jump yin))
+         (min-duration (yin-transcriber-min-duration yin))
+         (range (hint-pitch-range hints))
+         (tau-lo (max 2 (floor s (midi-to-hz (second range)))))
+         (tau-hi (min (1- w) (ceiling s (midi-to-hz (first range)))))
+         ;; F = ceiling(L / HOP). Frame i starts where the W-sample integration
+         ;; window centred on c = i HOP starts under audio-protocol/dsp's
+         ;; :CENTER convention, c - floor(W/2), and runs on for N samples.
+         (count (dsp:frame-count length w hop))
+         (rms (make-array count :element-type 'double-float :initial-element 0d0))
+         (f0 (make-array count :initial-element nil))
+         (voicing (make-array count :element-type 'double-float :initial-element 0d0)))
+    (flet ((frame (i)
+             (%yin-frame samples (dsp:frame-start i w hop) n)))
+      ;; Step 5's gate needs the loudest frame first: RMS of every frame, then
+      ;; YIN (steps 2-4, 6) only where the gate lets the frame in.
+      (dotimes (i count)
+        (setf (aref rms i) (dsp:rms (frame i))))
+      (let* ((loudest (reduce #'max rms :initial-value 0d0))
+             (gate (* (audio:db-to-gain (yin-transcriber-gate-db yin)) loudest)))
+        (when (plusp loudest)
+          (dotimes (i count)
+            (unless (< (aref rms i) gate)
+              (let* ((d (dsp:yin-cmndf (frame i) :window w))   ; lags 0 .. W
+                     (tau (%yin-lag d tau-lo tau-hi threshold)))
+                (when tau
+                  (setf (svref f0 i) (/ s (%yin-period d tau))
+                        (aref voicing i) (max 0d0 (min 1d0 (- 1d0 (aref d tau))))))))))))
+    ;; Step 7: runs of voiced frames, each within JUMP of its running median.
+    (let ((notes '())
+          (start nil)                     ; the open run's first frame, or NIL
+          (sorted '())                    ; its m values, ascending
+          (size 0)
+          (voicing-sum 0d0))
+      (flet ((close-run (end)
+               ;; The open run is frames START .. END.
+               (when start
+                 (when (>= (/ (* (1+ (- end start)) hop) s) min-duration)
+                   (push (make-note-event :onset (/ (* start hop) s)
+                                          :offset (/ (* (1+ end) hop) s)
+                                          :pitch (%median sorted size)
+                                          :confidence (min 1d0 (/ voicing-sum size)))
+                         notes))
+                 (setf start nil
+                       sorted '()
+                       size 0
+                       voicing-sum 0d0))))
+        (dotimes (i count)
+          (let ((f (svref f0 i)))
+            (if (null f)
+                (close-run (1- i))
+                (let ((m (hz-to-midi f)))
+                  (when (and start (> (abs (- m (%median sorted size))) jump))
+                    (close-run (1- i)))
+                  (unless start
+                    (setf start i))
+                  (setf sorted (merge 'list (list m) sorted #'<))
+                  (incf size)
+                  (incf voicing-sum (aref voicing i))))))
+        (close-run (1- count)))
+      (values (nreverse notes)
+              (make-f0-contour :sample-rate s :hop hop :f0 f0 :voicing voicing)))))

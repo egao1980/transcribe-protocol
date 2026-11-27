@@ -70,5 +70,22 @@
                                                 (min-phrase-notes +min-phrase-notes+))
   "A TRANSCRIPTION from a backend's NOTES and CONTOUR: tuning, drift and key
 fit computed by the protocol. See transcription.lisp."
-  (declare (ignorable notes contour hints backend duration phrase-gap min-phrase-notes))
-  (%t0-pending 'finish-transcription))
+  (let ((raw (check-notes notes)))     ; fresh, never NOTES itself
+    (check-type contour f0-contour)
+    (check-type backend (or null (satisfies %keyword-plist-p)) "a property list with keyword keys")
+    (check-type duration (or null (real 0)))
+    (check-type phrase-gap (real 0))
+    (check-type min-phrase-notes (integer 1))
+    (let* ((hints (normalize-hints hints))
+           (g (estimate-tuning raw))
+           (drift (estimate-drift raw :tuning g :gap phrase-gap :min-notes min-phrase-notes))
+           (corrected (remove-drift raw drift :tuning g))
+           (key-fit (handler-bind ((mt:no-key-evidence
+                                     (lambda (c) (use-value nil c))))
+                      (mt:fit-key (map 'list (lambda (note)
+                                               (cons (note-event-pitch note)
+                                                     (note-event-duration note)))
+                                       corrected)
+                                  :hint (getf hints :key)))))
+      (%make-transcription corrected raw contour g drift key-fit hints backend
+                           (and duration (rational duration))))))

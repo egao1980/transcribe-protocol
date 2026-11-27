@@ -92,8 +92,8 @@ DETECT-NOTES, and optionally TRANSCRIBER-SAMPLE-RATE and TRANSCRIBER-INFO."))
   (:documentation "The backend's job: (values notes contour) for AUDIO, a mono
 PCM-BUFFER from PREPARE-AUDIO, and normalized HINTS. See protocol.lisp.")
   (:method ((transcriber transcriber) audio hints)
-    (declare (ignorable audio hints))
-    (%t0-pending 'detect-notes)))
+    (declare (ignore audio hints))
+    (error 'transcriber-error :transcriber transcriber :reason "no DETECT-NOTES method")))
 
 (defgeneric transcribe (transcriber audio &key hints)
   (:documentation "A TRANSCRIPTION of AUDIO, a PCM-BUFFER of one sung line, with
@@ -102,9 +102,49 @@ HINTS (:key :meter :tempo :pitch-range). See protocol.lisp."))
 (defun prepare-audio (transcriber audio)
   "AUDIO as DETECT-NOTES gets it: mono, checked for length and silence,
 resampled to the transcriber's rate; and its duration. See protocol.lisp."
-  (declare (ignorable transcriber audio))
-  (%t0-pending 'prepare-audio))
+  (check-type transcriber transcriber)
+  (check-type audio audio:pcm-buffer)   ; also a USE-VALUE replacement's first check
+  (let* ((mono (if (= 1 (audio:pcm-buffer-channels audio)) audio (dsp:downmix audio)))
+         (duration (audio:pcm-buffer-duration mono)))
+    (flet ((unusable (condition)
+             ;; CONTINUE returns from here and the next step runs; USE-VALUE
+             ;; prepares the replacement from step 1, through this function.
+             (restart-case (error condition)
+               (continue ()
+                 :report "Waive this check and go on."
+                 nil)
+               (use-value (replacement)
+                 :report "Use another PCM-BUFFER (checked again from the start)."
+                 :interactive %read-form
+                 (return-from prepare-audio (prepare-audio transcriber replacement))))))
+      (when (< duration *minimum-duration*)
+        (unusable (make-condition 'audio-too-short
+                                  :duration duration :minimum *minimum-duration*
+                                  :reason "shorter than the minimum duration")))
+      (let ((peak (dsp:peak mono)))
+        (when (< peak (audio:db-to-gain *silence-peak-db*))
+          (unusable (make-condition 'silent-audio
+                                    :duration duration :peak peak
+                                    :reason (format nil "peak below ~A dBFS" *silence-peak-db*)))))
+      ;; Checked here: 0 or 16000.0 must not reach RESAMPLE as a TYPE-ERROR.
+      (let ((rate (transcriber-sample-rate transcriber)))
+        (unless (typep rate '(or null (integer 1)))
+          (error 'transcriber-error
+                 :transcriber transcriber
+                 :reason (format nil "sample rate ~S is not NIL or an integer >= 1" rate)))
+        (values (if (or (null rate) (= rate (audio:pcm-buffer-sample-rate mono)))
+                    mono                ; AUDIO itself when it is mono at that rate
+                    (audio:resample mono rate))
+                duration)))))
 
 (defmethod transcribe ((transcriber transcriber) audio &key hints)
-  (declare (ignorable audio hints))
-  (%t0-pending 'transcribe))
+  (check-type audio audio:pcm-buffer)
+  (let ((hints (normalize-hints hints)))
+    (multiple-value-bind (buffer duration) (prepare-audio transcriber audio)
+      (multiple-value-bind (notes contour) (detect-notes transcriber buffer hints)
+        (unless (typep contour 'f0-contour)
+          (error 'transcriber-error :transcriber transcriber :reason "not an f0 contour"))
+        (finish-transcription notes contour
+                              :hints hints
+                              :backend (transcriber-info transcriber)
+                              :duration duration)))))
